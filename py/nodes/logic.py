@@ -362,12 +362,26 @@ class anythingIndexSwitch(io.ComfyNode):
         return prompt, unique_id
 
     @classmethod
+    def _link_is_active(cls, prompt, val):
+        try:
+            from comfy_execution.graph_utils import is_link
+        except Exception:
+            is_link = lambda x: isinstance(x, list) and len(x) == 2
+        if not is_link(val):
+            return True
+        source = prompt.get(val[0])
+        if not source:
+            return False
+        # ComfyUI mute mode (LiteGraph NEVER) - muted nodes produce no output
+        return source.get("mode", 0) != 2
+
+    @classmethod
     def _connected_inputs(cls, prompt, unique_id):
         node_inputs = prompt[unique_id]["inputs"]
         connected = []
         for i in range(MAX_FLOW_NUM):
             key = "value%d" % i
-            if key in node_inputs:
+            if key in node_inputs and cls._link_is_active(prompt, node_inputs[key]):
                 connected.append((key, node_inputs[key]))
         return connected
 
@@ -417,7 +431,7 @@ class anythingIndexSwitch(io.ComfyNode):
         prompt, unique_id = cls._prompt_and_id()
         connected = cls._connected_inputs(prompt, unique_id)
         if not connected:
-            raise Exception("[EasyUse] Any Index Switch: no connected inputs")
+            raise Exception("[EasyUse] Any Index Switch: no active connected inputs (muted nodes are skipped)")
 
         if GraphBuilder is None:
             raise Exception("[EasyUse] Any Index Switch: flow execution is unavailable")
@@ -426,13 +440,12 @@ class anythingIndexSwitch(io.ComfyNode):
         if inv_index is not None:
             key = "value%d" % inv_index
             link = dict(connected).get(key)
-            if link is None:
-                raise Exception(f"[EasyUse] Any Index Switch: value{inv_index} is not connected")
-            if not is_link(link):
-                return io.NodeOutput(link)
-            graph = GraphBuilder()
-            out = graph.node("easy ifElse", boolean=True, on_true=link, on_false=link).out(0)
-            return io.NodeOutput(expand=graph.finalize(), result=out)
+            if link is not None:
+                if not is_link(link):
+                    return io.NodeOutput(link)
+                graph = GraphBuilder()
+                out = graph.node("easy ifElse", boolean=True, on_true=link, on_false=link).out(0)
+                return io.NodeOutput(out, expand=graph.finalize())
 
         _, result = connected[-1]
         graph = GraphBuilder()
@@ -442,7 +455,7 @@ class anythingIndexSwitch(io.ComfyNode):
 
         if not is_link(result):
             return io.NodeOutput(result)
-        return io.NodeOutput(expand=graph.finalize(), result=result)
+        return io.NodeOutput(result, expand=graph.finalize())
 
 
 class imageIndexSwitch(io.ComfyNode):
