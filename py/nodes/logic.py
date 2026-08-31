@@ -332,25 +332,117 @@ class anythingInversedSwitch(io.ComfyNode):
 class anythingIndexSwitch(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        inputs = [io.Int.Input("index", default=0, min=0, max=9, step=1)]
+        inputs = []
         for i in range(MAX_FLOW_NUM):
-            inputs.append(io.AnyType.Input("value%d" % i, optional=True, lazy=True))
+            inputs.append(io.AnyType.Input(
+                "value%d" % i,
+                optional=True,
+                lazy=True,
+                raw_link=True,
+            ))
         return io.Schema(
             node_id="easy anythingIndexSwitch",
             category="EasyUse/Logic/Index Switch",
             inputs=inputs,
             outputs=[io.AnyType.Output("value")],
+            enable_expand=True,
+            hidden=[io.Hidden.prompt, io.Hidden.unique_id],
         )
 
     @classmethod
-    def check_lazy_status(cls, index, **kwargs):
-        key = "value%d" % index
-        if kwargs.get(key, None) is None:
-            return [key]
+    def _prompt_and_id(cls):
+        prompt = cls.hidden.prompt
+        unique_id = cls.hidden.unique_id
+        if isinstance(prompt, list):
+            prompt = prompt[0]
+        if isinstance(unique_id, list):
+            unique_id = unique_id[0]
+        if isinstance(unique_id, str) and "." in unique_id:
+            unique_id = unique_id.split(".")[-1]
+        return prompt, unique_id
 
     @classmethod
-    def execute(cls, index, **kwargs):
-        return io.NodeOutput(kwargs["value%d" % index])
+    def _connected_inputs(cls, prompt, unique_id):
+        node_inputs = prompt[unique_id]["inputs"]
+        connected = []
+        for i in range(MAX_FLOW_NUM):
+            key = "value%d" % i
+            if key in node_inputs:
+                connected.append((key, node_inputs[key]))
+        return connected
+
+    @classmethod
+    def _inversed_switch_index(cls, prompt, connected):
+        try:
+            from comfy_execution.graph_utils import is_link
+        except Exception:
+            return None
+        source_id = None
+        for _, val in connected:
+            if not is_link(val):
+                return None
+            if source_id is None:
+                source_id = val[0]
+            elif source_id != val[0]:
+                return None
+        if source_id is None:
+            return None
+        source = prompt.get(source_id)
+        if not source or source.get("class_type") != "easy anythingInversedSwitch":
+            return None
+        index = source["inputs"].get("index", 0)
+        if is_link(index):
+            return None
+        return int(index)
+
+    @classmethod
+    def validate_inputs(cls, **kwargs):
+        for i in range(MAX_FLOW_NUM):
+            if "value%d" % i in kwargs:
+                return True
+        return "At least one value input must be connected"
+
+    @classmethod
+    def check_lazy_status(cls, **kwargs):
+        return []
+
+    @classmethod
+    def execute(cls, **kwargs):
+        try:
+            from comfy_execution.graph_utils import GraphBuilder, is_link
+        except Exception:
+            GraphBuilder = None
+            is_link = None
+
+        prompt, unique_id = cls._prompt_and_id()
+        connected = cls._connected_inputs(prompt, unique_id)
+        if not connected:
+            raise Exception("[EasyUse] Any Index Switch: no connected inputs")
+
+        if GraphBuilder is None:
+            raise Exception("[EasyUse] Any Index Switch: flow execution is unavailable")
+
+        inv_index = cls._inversed_switch_index(prompt, connected)
+        if inv_index is not None:
+            key = "value%d" % inv_index
+            link = dict(connected).get(key)
+            if link is None:
+                raise Exception(f"[EasyUse] Any Index Switch: value{inv_index} is not connected")
+            if not is_link(link):
+                return io.NodeOutput(link)
+            graph = GraphBuilder()
+            out = graph.node("easy ifElse", boolean=True, on_true=link, on_false=link).out(0)
+            return io.NodeOutput(expand=graph.finalize(), result=out)
+
+        _, result = connected[-1]
+        graph = GraphBuilder()
+        for _, link in reversed(connected[:-1]):
+            is_empty = graph.node("easy isNone", any=link).out(0)
+            result = graph.node("easy ifElse", boolean=is_empty, on_true=result, on_false=link).out(0)
+
+        if not is_link(result):
+            return io.NodeOutput(result)
+        return io.NodeOutput(expand=graph.finalize(), result=result)
 
 
 class imageIndexSwitch(io.ComfyNode):
@@ -1011,9 +1103,14 @@ class isNone(io.ComfyNode):
 
     @classmethod
     def execute(cls, any):
+        try:
+            from comfy_execution.graph import ExecutionBlocker
+        except Exception:
+            ExecutionBlocker = ()
         result = (isinstance(any, str) and any == "") or \
                  (isinstance(any, (int, float)) and any == 0) or \
-                 any is None
+                 any is None or \
+                 (ExecutionBlocker and isinstance(any, ExecutionBlocker))
         return io.NodeOutput(result)
 
 
